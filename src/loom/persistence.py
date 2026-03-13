@@ -88,9 +88,18 @@ async def _sqlite_checkpointer() -> AsyncGenerator[BaseCheckpointSaver, None]:
 
 @asynccontextmanager
 async def _postgres_checkpointer() -> AsyncGenerator[BaseCheckpointSaver, None]:
-    """Yield an ``AsyncPostgresSaver`` connected to Postgres."""
+    """Yield an ``AsyncPostgresSaver`` connected to Postgres.
+
+    Uses a manually-configured ``AsyncConnectionPool`` so we can set
+    ``max_idle`` to recycle connections before Neon's serverless compute
+    auto-suspends them (default: 5 min = 300 s).  Without this, the pool
+    holds stale connections that Neon has already killed, causing
+    "the connection is closed" / "terminating connection due to
+    administrator command" errors on the next request.
+    """
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # noqa: PLC0415
+        from psycopg_pool import AsyncConnectionPool  # noqa: PLC0415
     except ImportError as exc:
         raise ImportError(
             "Install 'langgraph-checkpoint-postgres' and 'psycopg[binary,pool]' "
@@ -100,7 +109,24 @@ async def _postgres_checkpointer() -> AsyncGenerator[BaseCheckpointSaver, None]:
     dsn = settings.effective_postgres_dsn
     logger.info("persistence | backend=postgres | dsn=%s", _redact_dsn(dsn))
 
-    async with AsyncPostgresSaver.from_conn_string(dsn) as cp:
+    # min_size=0: no persistent idle connections — nothing for Neon to kill.
+    # max_idle=240 s: close connections idle > 4 min (before Neon's 5-min suspend).
+    # check: ping each connection before use so stale ones are replaced immediately.
+    # prepare_threshold=0: disable prepared statements (breaks on recycled connections).
+    async def _check(conn) -> None:  # type: ignore[type-arg]
+        await conn.execute("SELECT 1")
+
+    async with AsyncConnectionPool(
+        dsn,
+        min_size=0,
+        max_size=10,
+        max_idle=240,
+        check=_check,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
+        open=False,
+    ) as pool:
+        await pool.open(wait=True)
+        cp = AsyncPostgresSaver(pool)
         await cp.setup()
         logger.info("persistence | Postgres checkpointer ready")
         yield cp
