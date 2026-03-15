@@ -112,6 +112,30 @@ def _parse_response(text: str) -> LoomResponse:
     raise ValueError(f"Could not extract a complete JSON object from model output: {text[:200]!r}")
 
 
+def _is_tool_error(content: str) -> bool:
+    """Return True when a tool output looks like an error or empty result.
+
+    Convention: tools should raise exceptions for hard errors (pydantic-ai
+    converts those to error strings automatically).  This heuristic also
+    catches empty returns and common error-prefix patterns.
+    """
+    stripped = content.strip()
+    if not stripped:
+        return True
+    lower = stripped.lower()
+    error_signals = (
+        "error:",
+        "[error]",
+        "exception:",
+        "traceback",
+        "failed:",
+        "tool failed",
+        "not found",
+        "timeout",
+    )
+    return any(sig in lower for sig in error_signals)
+
+
 # ---------------------------------------------------------------------------
 # Node: agent
 # ---------------------------------------------------------------------------
@@ -120,18 +144,42 @@ def _parse_response(text: str) -> LoomResponse:
 async def agent_node(state: LoomState) -> dict:
     """Call the Pydantic AI agent and update state with its structured response.
 
+    Self-correction: if ``state.last_tool_error`` is set (i.e. the previous
+    turn's tool call returned an error), the prompt is prefixed with
+    instructions telling the model to reformulate its query before retrying.
+
     pydantic-ai handles tool selection and execution internally within a single
-    agent.run() call.  After it returns, we extract any tool outputs from the
-    run's message history and store them in state for the next turn.
+    agent.run() call.  After it returns, we inspect all tool return values; if
+    any look like an error we populate ``last_tool_error`` so the routing edge
+    can loop us back here on the next turn.
 
     Returns a partial state dict containing:
     - ``messages``: ToolMessages for each tool call + final AIMessage.
     - ``response``: the validated ``LoomResponse``.
     - ``iteration_count``: incremented by 1.
     - ``tool_outputs``: merged dict of all tool results from this turn.
+    - ``internal_monologue``: reasoning text from this turn's response.
+    - ``last_tool_error``: error string if a tool failed, else None.
+    - ``error_count``: incremented if a new tool error was detected.
     """
-    # Build prompt — include prior conversation and any accumulated tool outputs.
+    # ------------------------------------------------------------------
+    # Build prompt
+    # ------------------------------------------------------------------
     prompt_parts: list[str] = []
+
+    # Self-correction preamble — shown when a previous tool call failed.
+    if state.last_tool_error:
+        prompt_parts.append(
+            f"⚠️  Your previous tool call returned an error:\n"
+            f"    {state.last_tool_error}\n\n"
+            "Please reformulate your search query or choose a different tool "
+            "to gather the information you need, then try again."
+        )
+        logger.warning(
+            "agent_node | self-correction | error_count=%d | error=%s",
+            state.error_count,
+            state.last_tool_error,
+        )
 
     prior = [m for m in state.messages if isinstance(m, (HumanMessage, AIMessage))]
     if prior:
@@ -175,9 +223,13 @@ async def agent_node(state: LoomState) -> dict:
         response.needs_refinement,
     )
 
-    # Collect tool outputs from this pydantic-ai run (may be zero if no tools called).
+    # ------------------------------------------------------------------
+    # Collect tool outputs; detect any errors in this run.
+    # ------------------------------------------------------------------
     new_tool_outputs: dict[str, list[str]] = {}
     extra_messages: list[ToolMessage] = []
+    detected_error: str | None = None
+    new_error_count = state.error_count
 
     for msg in result.all_messages():
         if not isinstance(msg, ModelRequest):
@@ -196,6 +248,16 @@ async def agent_node(state: LoomState) -> dict:
             )
             logger.info("agent_node | tool_called=%s", tool_name)
 
+            # Self-correction: flag the first error we encounter.
+            if detected_error is None and _is_tool_error(content):
+                detected_error = f"Tool '{tool_name}' returned: {content[:200]}"
+                new_error_count += 1
+                logger.warning(
+                    "agent_node | tool_error detected | tool=%s | content=%s",
+                    tool_name,
+                    content[:100],
+                )
+
     # Merge new outputs into accumulated state.
     merged_outputs: dict[str, list[str]] = dict(state.tool_outputs)
     for k, v in new_tool_outputs.items():
@@ -206,4 +268,32 @@ async def agent_node(state: LoomState) -> dict:
         "response": response,
         "iteration_count": state.iteration_count + 1,
         "tool_outputs": merged_outputs,
+        "internal_monologue": response.reasoning,
+        "last_tool_error": detected_error,   # None clears it for next turn
+        "error_count": new_error_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Node: respond  (Human-in-the-Loop target)
+# ---------------------------------------------------------------------------
+
+
+async def respond_node(state: LoomState) -> dict:
+    """Finalisation node — the HITL interrupt fires *before* this node runs.
+
+    When ``interrupt_before=["respond"]`` is set in the compiled graph, the
+    graph pauses here so an operator can inspect ``state`` and decide whether
+    to approve.  On approval the caller resumes with ``graph.ainvoke(None,
+    config=config)``, which executes this node and proceeds to END.
+
+    The node itself is intentionally a no-op: the response is already fully
+    formed in ``state.response`` by ``agent_node``.  Its sole purpose is to
+    act as a named checkpoint for the interrupt mechanism.
+    """
+    logger.info(
+        "respond_node | finalising | confidence=%.2f | iterations=%d",
+        state.response.confidence_score if state.response else 0.0,
+        state.iteration_count,
+    )
+    return {}

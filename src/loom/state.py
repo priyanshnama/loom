@@ -42,3 +42,14 @@ class LoomState(BaseModel):
 
     # Ceiling on refinement loops (overridable per-invocation via config).
     max_iterations: int = 3
+
+    # Agent's chain-of-thought / reasoning text from the most recent turn.
+    # Populated by agent_node from the LoomResponse.reasoning field.
+    internal_monologue: str = ""
+
+    # Cumulative count of tool errors across all turns in this thread.
+    error_count: int = 0
+
+    # Most recent tool error message, or None if the last tool call succeeded.
+    # Cleared at the start of each agent_node run; re-set if errors occur.
+    last_tool_error: str | None = None
