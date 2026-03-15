@@ -178,10 +178,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     resp = final_state.response
     confidence_bar = _confidence_bar(resp.confidence_score)
-    footer = (
-        f"\n\n<i>Confidence: {confidence_bar} {resp.confidence_score:.0%}"
-        f" · {final_state.iteration_count} iteration(s)</i>"
-    )
+
+    footer_parts = [
+        f"Confidence: {confidence_bar} {resp.confidence_score:.0%}"
+        f" · {final_state.iteration_count} iteration(s)",
+    ]
+    if final_state.error_count:
+        footer_parts.append(f"⚠️ Tool errors: {final_state.error_count}")
+    if final_state.internal_monologue:
+        monologue = html.escape(final_state.internal_monologue[:300])
+        if len(final_state.internal_monologue) > 300:
+            monologue += "…"
+        footer_parts.append(f"💭 {monologue}")
+
+    footer = "\n\n<i>" + "\n".join(footer_parts) + "</i>"
 
     body = html.escape(resp.answer) + footer
     for chunk in _split_message(body):
