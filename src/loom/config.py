@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import Field, PostgresDsn
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Default system prompt — edit src/loom/prompts/system.md or set LOOM_SYSTEM_PROMPT in .env.
@@ -21,17 +21,20 @@ class Settings(BaseSettings):
     # System prompt — loaded from prompts/system.md by default; override via env var.
     loom_system_prompt: str = Field(default=_DEFAULT_SYSTEM_PROMPT, alias="LOOM_SYSTEM_PROMPT")
 
-    # Persistence backend: "memory" | "sqlite" | "postgres"
+    # Persistence backend: "memory" | "sqlite" | "neo4j"
     # memory  — in-process only; lost when the process exits (default, no setup needed)
     # sqlite  — file-backed SQLite; persists across CLI invocations, no server required
-    # postgres — production-grade; requires a running Postgres instance
+    # neo4j   — production-grade; requires a running Neo4j instance
     loom_persistence: str = Field("memory", alias="LOOM_PERSISTENCE")
 
     # SQLite persistence
     sqlite_path: str = Field("./loom_checkpoints.db", alias="SQLITE_PATH")
 
-    # Postgres persistence (used when LOOM_PERSISTENCE=postgres)
-    postgres_dsn: PostgresDsn | None = Field(None, alias="POSTGRES_DSN")
+    # Neo4j persistence + knowledge graph (used when LOOM_PERSISTENCE=neo4j, and always for KG)
+    neo4j_uri: str = Field("bolt://localhost:7687", alias="NEO4J_URI")
+    neo4j_username: str = Field("neo4j", alias="NEO4J_USERNAME")
+    neo4j_password: str = Field("", alias="NEO4J_PASSWORD")
+    neo4j_database: str = Field("neo4j", alias="NEO4J_DATABASE")
 
     # Agent tuning
     loom_confidence_threshold: float = Field(0.75, alias="LOOM_CONFIDENCE_THRESHOLD")
@@ -42,13 +45,6 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = Field("INFO", alias="LOG_LEVEL")
-
-    @property
-    def effective_postgres_dsn(self) -> str:
-        """Return the Postgres DSN as a plain string."""
-        if self.postgres_dsn:
-            return str(self.postgres_dsn)
-        raise ValueError("POSTGRES_DSN must be set when LOOM_PERSISTENCE=postgres")
 
 
 # Module-level singleton — import this everywhere.
