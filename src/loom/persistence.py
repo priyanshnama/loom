@@ -16,6 +16,7 @@ Usage
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Iterator, Sequence
@@ -117,15 +118,17 @@ class Neo4jCheckpointer(BaseCheckpointSaver):
     async def setup(self) -> None:
         """Create indexes on first run."""
         async with self._driver.session(database=self._db) as session:
-            await session.run(
+            r1 = await session.run(
                 "CREATE INDEX checkpoint_lookup IF NOT EXISTS "
                 "FOR (c:Checkpoint) ON (c.thread_id, c.checkpoint_ns, c.checkpoint_id)"
             )
-            await session.run(
+            await r1.consume()
+            r2 = await session.run(
                 "CREATE INDEX checkpoint_write_lookup IF NOT EXISTS "
                 "FOR (w:CheckpointWrite) "
                 "ON (w.thread_id, w.checkpoint_ns, w.checkpoint_id, w.task_id, w.idx)"
             )
+            await r2.consume()
         logger.info("persistence | Neo4j checkpointer ready")
 
     # ------------------------------------------------------------------
@@ -177,7 +180,7 @@ class Neo4jCheckpointer(BaseCheckpointSaver):
 
     def _build_tuple(self, node: dict, writes: list[dict]) -> CheckpointTuple:
         checkpoint = self.serde.loads_typed((node["type"], self._dec(node["checkpoint_data"])))
-        metadata = self.serde.loads(node["metadata_data"])
+        metadata = json.loads(node["metadata_data"])
         config = self._cfg(node["thread_id"], node["checkpoint_ns"], node["checkpoint_id"])
         parent_config: RunnableConfig | None = None
         if node.get("parent_checkpoint_id"):
@@ -285,10 +288,10 @@ class Neo4jCheckpointer(BaseCheckpointSaver):
         cid: str = checkpoint["id"]
 
         cp_type, cp_bytes = self.serde.dumps_typed(checkpoint)
-        meta_str = self.serde.dumps(metadata)
+        meta_str = json.dumps(metadata)
 
         async with self._driver.session(database=self._db) as session:
-            await session.run(
+            result = await session.run(
                 """
                 MERGE (c:Checkpoint {thread_id: $tid, checkpoint_ns: $ns, checkpoint_id: $cid})
                 SET c.parent_checkpoint_id = $parent_id,
@@ -303,6 +306,7 @@ class Neo4jCheckpointer(BaseCheckpointSaver):
                 cp_data=self._enc(cp_bytes),
                 meta_data=meta_str,
             )
+            await result.consume()
         return self._cfg(thread_id, ns, cid)
 
     async def aput_writes(
@@ -319,7 +323,7 @@ class Neo4jCheckpointer(BaseCheckpointSaver):
         async with self._driver.session(database=self._db) as session:
             for idx, (channel, value) in enumerate(writes):
                 w_type, w_bytes = self.serde.dumps_typed(value)
-                await session.run(
+                result = await session.run(
                     """
                     MATCH (c:Checkpoint {thread_id: $tid, checkpoint_ns: $ns, checkpoint_id: $cid})
                     MERGE (w:CheckpointWrite {
@@ -333,3 +337,4 @@ class Neo4jCheckpointer(BaseCheckpointSaver):
                     task_id=task_id, idx=idx,
                     channel=channel, type=w_type, val=self._enc(w_bytes),
                 )
+                await result.consume()

@@ -9,18 +9,9 @@ Adding a new tool
 
 from __future__ import annotations
 
-from loom.tools.booking import book_flight, cancel_flight
-from loom.tools.documents import download_document
-from loom.tools.onboarding import onboard_user
-from loom.tools.search import web_search
+from loom.tools.constitution import query_constitution
 
 # Ordered list of all tools the pydantic-ai agent may call.
-# pydantic-ai introspects each function's type annotations and docstring to
-# build the JSON schema it sends to the model as tool definitions.
 TOOLS: list = [
-    web_search,
-    book_flight,
-    cancel_flight,
-    onboard_user,
-    download_document,
+    query_constitution,
 ]

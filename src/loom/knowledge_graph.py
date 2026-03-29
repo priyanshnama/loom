@@ -1,21 +1,25 @@
 """Neo4j knowledge graph for Loom.
 
-All search results, entities, and their relationships are stored here so the
-agent can retrieve relevant prior knowledge before hitting external tools.
+Primary use: querying the Constitution of India knowledge graph.
 
-Schema
-------
-(:Thread {id})
-(:SearchResult {id, query, result, thread_id, created_at})
-(:Entity {name, type})
-(:Thread)-[:HAS_RESULT]->(:SearchResult)
-(:SearchResult)-[:MENTIONS]->(:Entity)
-(:Entity)-[:RELATED_TO]->(:Entity)   (co-occurrence within same result)
+Constitution Schema
+-------------------
+(:Constitution)
+(:Preamble {text})
+(:Part {number, title})
+(:Chapter {number, title})
+(:Article {number, heading, omitted})
+(:Clause {id, number, text, article_id})
+(:Sub-clause {id, number, text, clause_id})
+(:Schedule {number, title, ordinal})
+(:Entry {id, number, text})
+
+Relationships: CONTAINS, HAS_INTRO, HAS_SCHEDULE, HAS_APPENDIX
+
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 from typing import Any
@@ -51,148 +55,148 @@ async def get_kg_driver() -> Any:
 
         global _shared_database
         _shared_database = settings.neo4j_database
-        await _setup_schema(_shared_driver, _shared_database)
     return _shared_driver
 
 
-async def _setup_schema(driver: Any, database: str) -> None:
-    async with driver.session(database=database) as session:
-        await session.run(
-            "CREATE INDEX thread_id_idx IF NOT EXISTS FOR (t:Thread) ON (t.id)"
-        )
-        await session.run(
-            "CREATE INDEX entity_name_idx IF NOT EXISTS FOR (e:Entity) ON (e.name)"
-        )
-        await session.run(
-            "CREATE INDEX search_result_id_idx IF NOT EXISTS "
-            "FOR (s:SearchResult) ON (s.id)"
-        )
-    logger.info("knowledge_graph | schema ready")
-
-
 # ---------------------------------------------------------------------------
-# Write operations
+# Read operations (Neo4j is read-only — no writes to the constitution KG)
 # ---------------------------------------------------------------------------
 
 
-def _extract_entities(text: str) -> list[str]:
-    """Very lightweight entity extraction: capitalised words / quoted phrases."""
-    # Quoted phrases
-    quoted = re.findall(r"'([^']{3,40})'|\"([^\"]{3,40})\"", text)
-    entities = [q[0] or q[1] for q in quoted]
-    # Capitalised word sequences (e.g. "Quantum Entanglement")
-    cap_seq = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", text)
-    entities.extend(cap_seq)
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    result: list[str] = []
-    for e in entities:
-        key = e.lower()
-        if key not in seen and len(e) > 2:
-            seen.add(key)
-            result.append(e)
-    return result[:20]  # cap at 20 per result
+async def query_knowledge(query: str, thread_id: str, limit: int = 8) -> list[str]:  # noqa: ARG001
+    """Search the Constitution of India KG for content relevant to *query*.
 
-
-async def store_search_result(query: str, result: str, thread_id: str) -> None:
-    """Persist a search result and its entities into the knowledge graph."""
-    driver = await get_kg_driver()
-    result_id = hashlib.sha256(f"{thread_id}:{query}:{result}".encode()).hexdigest()[:16]
-    entities = _extract_entities(result)
-
-    async with driver.session(database=_shared_database) as session:
-        # Upsert Thread
-        await session.run(
-            "MERGE (:Thread {id: $tid})",
-            tid=thread_id,
-        )
-        # Create SearchResult linked to Thread
-        await session.run(
-            """
-            MERGE (s:SearchResult {id: $rid})
-            SET s.query = $query,
-                s.result = $result,
-                s.thread_id = $tid,
-                s.created_at = datetime()
-            WITH s
-            MATCH (t:Thread {id: $tid})
-            MERGE (t)-[:HAS_RESULT]->(s)
-            """,
-            rid=result_id, query=query, result=result, tid=thread_id,
-        )
-        # Upsert entities and link to result; connect co-occurring entities
-        for entity in entities:
-            await session.run(
-                """
-                MERGE (e:Entity {name: $name})
-                ON CREATE SET e.type = 'concept'
-                WITH e
-                MATCH (s:SearchResult {id: $rid})
-                MERGE (s)-[:MENTIONS]->(e)
-                """,
-                name=entity, rid=result_id,
-            )
-        # Co-occurrence edges between entities in the same result
-        for i, a in enumerate(entities):
-            for b in entities[i + 1 :]:
-                await session.run(
-                    """
-                    MATCH (a:Entity {name: $a}), (b:Entity {name: $b})
-                    MERGE (a)-[:RELATED_TO]->(b)
-                    """,
-                    a=a, b=b,
-                )
-    logger.debug(
-        "knowledge_graph | stored | thread=%s | entities=%d", thread_id, len(entities)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Read operations
-# ---------------------------------------------------------------------------
-
-
-async def query_knowledge(query: str, thread_id: str, limit: int = 5) -> list[str]:
-    """Return stored search results relevant to *query* for this thread.
-
-    Matching strategy (best-effort, no vector index required):
-    1. Full-text scan: results whose ``query`` field contains any word from the
-       input query (case-insensitive).
-    2. Entity match: results that mention entities found in the input query.
-    Results are deduplicated and capped at *limit*.
+    Searches Articles (by heading), Clauses (by text), Schedules, and Entries.
+    Returns formatted snippets like "Article 19 – <heading>: <clause text>".
+    Falls back to session SearchResult cache if no constitutional matches found.
     """
     driver = await get_kg_driver()
     words = [w.lower() for w in re.split(r"\W+", query) if len(w) > 3]
     if not words:
         return []
 
-    # Build a WHERE clause that matches any keyword
-    conditions = " OR ".join(
-        [f"toLower(s.query) CONTAINS $w{i}" for i in range(len(words))]
-        + [f"toLower(s.result) CONTAINS $w{i}" for i in range(len(words))]
-    )
-    params: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
-    params["tid"] = thread_id
-    params["limit"] = limit
+    snippets: list[str] = []
+
+    # --- Check for direct article number reference (e.g. "article 21", "Art. 356") ---
+    article_num_match = re.search(r"\bart(?:icle)?\.?\s*(\d+[A-Za-z]?)\b", query, re.IGNORECASE)
 
     async with driver.session(database=_shared_database) as session:
-        result = await session.run(
+        # 1. Direct article lookup by number
+        if article_num_match:
+            art_num = article_num_match.group(1)
+            r = await session.run(
+                """
+                MATCH (a:Article {number: $num})
+                OPTIONAL MATCH (a)-[:CONTAINS]->(c:Clause)
+                RETURN a.number AS num, a.heading AS heading,
+                       collect({n: c.number, t: c.text}) AS clauses
+                """,
+                num=art_num,
+            )
+            records = await r.data()
+            for rec in records:
+                heading = rec.get("heading") or ""
+                intro = f"Article {rec['num']} – {heading}"
+                clause_texts = [
+                    f"  ({cl['n']}) {cl['t']}"
+                    for cl in (rec.get("clauses") or [])
+                    if cl.get("t")
+                ]
+                if clause_texts:
+                    snippets.append(intro + ":\n" + "\n".join(clause_texts[:6]))
+                else:
+                    snippets.append(intro)
+
+        # 2. Keyword search in Article headings
+        heading_conds = " OR ".join(
+            f"toLower(a.heading) CONTAINS $w{i}" for i in range(len(words))
+        )
+        params: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
+        params["limit"] = limit
+
+        r = await session.run(
             f"""
-            MATCH (s:SearchResult)
-            WHERE s.thread_id = $tid AND ({conditions})
-            RETURN s.result AS result
-            ORDER BY s.created_at DESC
+            MATCH (a:Article)
+            WHERE NOT a.omitted AND ({heading_conds})
+            OPTIONAL MATCH (a)-[:CONTAINS]->(c:Clause)
+            WITH a, collect({{n: c.number, t: c.text}}) AS clauses
+            RETURN a.number AS num, a.heading AS heading, clauses
+            ORDER BY toInteger(a.number)
             LIMIT $limit
             """,
-            **params,
+            params,
         )
-        records = await result.data()
+        records = await r.data()
+        for rec in records:
+            heading = rec.get("heading") or ""
+            intro = f"Article {rec['num']} – {heading}"
+            clause_texts = [
+                f"  ({cl['n']}) {cl['t']}"
+                for cl in (rec.get("clauses") or [])
+                if cl.get("t")
+            ]
+            entry = intro + (":\n" + "\n".join(clause_texts[:4]) if clause_texts else "")
+            if entry not in snippets:
+                snippets.append(entry)
 
-    snippets = [r["result"] for r in records if r.get("result")]
+        # 3. Keyword search in Clause text
+        if len(snippets) < limit:
+            clause_conds = " OR ".join(
+                f"toLower(c.text) CONTAINS $w{i}" for i in range(len(words))
+            )
+            params2: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
+            params2["limit"] = limit - len(snippets)
+
+            r = await session.run(
+                f"""
+                MATCH (c:Clause)
+                WHERE ({clause_conds})
+                RETURN c.article_id AS art_id, c.number AS num, c.text AS text
+                LIMIT $limit
+                """,
+                params2,
+            )
+            records = await r.data()
+            seen_arts: set[str] = set()
+            for rec in records:
+                art_id = rec.get("art_id") or "?"
+                if art_id in seen_arts:
+                    continue
+                seen_arts.add(art_id)
+                snippet = f"Article {art_id}, Clause {rec['num']}: {rec['text']}"
+                if snippet not in snippets:
+                    snippets.append(snippet)
+
+        # 4. Schedule / Entry search
+        if len(snippets) < limit:
+            sched_conds = " OR ".join(
+                f"toLower(e.text) CONTAINS $w{i}" for i in range(len(words))
+            )
+            params3: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
+            params3["limit"] = max(2, limit - len(snippets))
+
+            r = await session.run(
+                f"""
+                MATCH (s:Schedule)-[:CONTAINS]->(e:Entry)
+                WHERE ({sched_conds})
+                RETURN s.ordinal AS sched, s.title AS stitle, e.number AS enum, e.text AS etext
+                LIMIT $limit
+                """,
+                params3,
+            )
+            records = await r.data()
+            for rec in records:
+                snippet = (
+                    f"{rec.get('sched','?')} Schedule ({rec.get('stitle','')}), "
+                    f"Entry {rec.get('enum','?')}: {rec.get('etext','')}"
+                )
+                if snippet not in snippets:
+                    snippets.append(snippet)
+
     logger.debug(
-        "knowledge_graph | query | thread=%s | hits=%d", thread_id, len(snippets)
+        "knowledge_graph | constitution query | hits=%d | query=%r", len(snippets), query
     )
-    return snippets
+    return snippets[:limit]
 
 
 async def get_related_entities(entity: str, depth: int = 1) -> list[str]:
