@@ -23,7 +23,11 @@ async def query_constitution(query: str) -> str:
     """
     from loom.knowledge_graph import query_knowledge  # noqa: PLC0415
 
-    snippets = await query_knowledge(query, thread_id="constitution", limit=8)
+    try:
+        snippets = await query_knowledge(query, thread_id="constitution", limit=8)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("query_constitution | KG unavailable: %s", exc)
+        return "The Constitution knowledge graph is currently unavailable. Please try again later."
     if not snippets:
         return "No matching provisions found in the Constitution of India for that query."
     return "\n\n---\n\n".join(snippets)

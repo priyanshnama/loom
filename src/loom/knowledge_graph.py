@@ -68,7 +68,7 @@ async def query_knowledge(query: str, thread_id: str, limit: int = 8) -> list[st
 
     Searches Articles (by heading), Clauses (by text), Schedules, and Entries.
     Returns formatted snippets like "Article 19 – <heading>: <clause text>".
-    Falls back to session SearchResult cache if no constitutional matches found.
+    Returns an empty list if the Neo4j instance is unreachable.
     """
     driver = await get_kg_driver()
     words = [w.lower() for w in re.split(r"\W+", query) if len(w) > 3]
@@ -80,18 +80,52 @@ async def query_knowledge(query: str, thread_id: str, limit: int = 8) -> list[st
     # --- Check for direct article number reference (e.g. "article 21", "Art. 356") ---
     article_num_match = re.search(r"\bart(?:icle)?\.?\s*(\d+[A-Za-z]?)\b", query, re.IGNORECASE)
 
-    async with driver.session(database=_shared_database) as session:
-        # 1. Direct article lookup by number
-        if article_num_match:
-            art_num = article_num_match.group(1)
+    try:
+        async with driver.session(database=_shared_database) as session:
+            # 1. Direct article lookup by number
+            if article_num_match:
+                art_num = article_num_match.group(1)
+                r = await session.run(
+                    """
+                    MATCH (a:Article {number: $num})
+                    OPTIONAL MATCH (a)-[:CONTAINS]->(c:Clause)
+                    RETURN a.number AS num, a.heading AS heading,
+                           collect({n: c.number, t: c.text}) AS clauses
+                    """,
+                    num=art_num,
+                )
+                records = await r.data()
+                for rec in records:
+                    heading = rec.get("heading") or ""
+                    intro = f"Article {rec['num']} – {heading}"
+                    clause_texts = [
+                        f"  ({cl['n']}) {cl['t']}"
+                        for cl in (rec.get("clauses") or [])
+                        if cl.get("t")
+                    ]
+                    if clause_texts:
+                        snippets.append(intro + ":\n" + "\n".join(clause_texts[:6]))
+                    else:
+                        snippets.append(intro)
+
+            # 2. Keyword search in Article headings
+            heading_conds = " OR ".join(
+                f"toLower(a.heading) CONTAINS $w{i}" for i in range(len(words))
+            )
+            params: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
+            params["limit"] = limit
+
             r = await session.run(
-                """
-                MATCH (a:Article {number: $num})
+                f"""
+                MATCH (a:Article)
+                WHERE NOT a.omitted AND ({heading_conds})
                 OPTIONAL MATCH (a)-[:CONTAINS]->(c:Clause)
-                RETURN a.number AS num, a.heading AS heading,
-                       collect({n: c.number, t: c.text}) AS clauses
+                WITH a, collect({{n: c.number, t: c.text}}) AS clauses
+                RETURN a.number AS num, a.heading AS heading, clauses
+                ORDER BY toInteger(a.number)
+                LIMIT $limit
                 """,
-                num=art_num,
+                params,
             )
             records = await r.data()
             for rec in records:
@@ -102,96 +136,67 @@ async def query_knowledge(query: str, thread_id: str, limit: int = 8) -> list[st
                     for cl in (rec.get("clauses") or [])
                     if cl.get("t")
                 ]
-                if clause_texts:
-                    snippets.append(intro + ":\n" + "\n".join(clause_texts[:6]))
-                else:
-                    snippets.append(intro)
+                entry = intro + (":\n" + "\n".join(clause_texts[:4]) if clause_texts else "")
+                if entry not in snippets:
+                    snippets.append(entry)
 
-        # 2. Keyword search in Article headings
-        heading_conds = " OR ".join(
-            f"toLower(a.heading) CONTAINS $w{i}" for i in range(len(words))
-        )
-        params: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
-        params["limit"] = limit
-
-        r = await session.run(
-            f"""
-            MATCH (a:Article)
-            WHERE NOT a.omitted AND ({heading_conds})
-            OPTIONAL MATCH (a)-[:CONTAINS]->(c:Clause)
-            WITH a, collect({{n: c.number, t: c.text}}) AS clauses
-            RETURN a.number AS num, a.heading AS heading, clauses
-            ORDER BY toInteger(a.number)
-            LIMIT $limit
-            """,
-            params,
-        )
-        records = await r.data()
-        for rec in records:
-            heading = rec.get("heading") or ""
-            intro = f"Article {rec['num']} – {heading}"
-            clause_texts = [
-                f"  ({cl['n']}) {cl['t']}"
-                for cl in (rec.get("clauses") or [])
-                if cl.get("t")
-            ]
-            entry = intro + (":\n" + "\n".join(clause_texts[:4]) if clause_texts else "")
-            if entry not in snippets:
-                snippets.append(entry)
-
-        # 3. Keyword search in Clause text
-        if len(snippets) < limit:
-            clause_conds = " OR ".join(
-                f"toLower(c.text) CONTAINS $w{i}" for i in range(len(words))
-            )
-            params2: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
-            params2["limit"] = limit - len(snippets)
-
-            r = await session.run(
-                f"""
-                MATCH (c:Clause)
-                WHERE ({clause_conds})
-                RETURN c.article_id AS art_id, c.number AS num, c.text AS text
-                LIMIT $limit
-                """,
-                params2,
-            )
-            records = await r.data()
-            seen_arts: set[str] = set()
-            for rec in records:
-                art_id = rec.get("art_id") or "?"
-                if art_id in seen_arts:
-                    continue
-                seen_arts.add(art_id)
-                snippet = f"Article {art_id}, Clause {rec['num']}: {rec['text']}"
-                if snippet not in snippets:
-                    snippets.append(snippet)
-
-        # 4. Schedule / Entry search
-        if len(snippets) < limit:
-            sched_conds = " OR ".join(
-                f"toLower(e.text) CONTAINS $w{i}" for i in range(len(words))
-            )
-            params3: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
-            params3["limit"] = max(2, limit - len(snippets))
-
-            r = await session.run(
-                f"""
-                MATCH (s:Schedule)-[:CONTAINS]->(e:Entry)
-                WHERE ({sched_conds})
-                RETURN s.ordinal AS sched, s.title AS stitle, e.number AS enum, e.text AS etext
-                LIMIT $limit
-                """,
-                params3,
-            )
-            records = await r.data()
-            for rec in records:
-                snippet = (
-                    f"{rec.get('sched','?')} Schedule ({rec.get('stitle','')}), "
-                    f"Entry {rec.get('enum','?')}: {rec.get('etext','')}"
+            # 3. Keyword search in Clause text
+            if len(snippets) < limit:
+                clause_conds = " OR ".join(
+                    f"toLower(c.text) CONTAINS $w{i}" for i in range(len(words))
                 )
-                if snippet not in snippets:
-                    snippets.append(snippet)
+                params2: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
+                params2["limit"] = limit - len(snippets)
+
+                r = await session.run(
+                    f"""
+                    MATCH (c:Clause)
+                    WHERE ({clause_conds})
+                    RETURN c.article_id AS art_id, c.number AS num, c.text AS text
+                    LIMIT $limit
+                    """,
+                    params2,
+                )
+                records = await r.data()
+                seen_arts: set[str] = set()
+                for rec in records:
+                    art_id = rec.get("art_id") or "?"
+                    if art_id in seen_arts:
+                        continue
+                    seen_arts.add(art_id)
+                    snippet = f"Article {art_id}, Clause {rec['num']}: {rec['text']}"
+                    if snippet not in snippets:
+                        snippets.append(snippet)
+
+            # 4. Schedule / Entry search
+            if len(snippets) < limit:
+                sched_conds = " OR ".join(
+                    f"toLower(e.text) CONTAINS $w{i}" for i in range(len(words))
+                )
+                params3: dict[str, Any] = {f"w{i}": w for i, w in enumerate(words)}
+                params3["limit"] = max(2, limit - len(snippets))
+
+                r = await session.run(
+                    f"""
+                    MATCH (s:Schedule)-[:CONTAINS]->(e:Entry)
+                    WHERE ({sched_conds})
+                    RETURN s.ordinal AS sched, s.title AS stitle, e.number AS enum, e.text AS etext
+                    LIMIT $limit
+                    """,
+                    params3,
+                )
+                records = await r.data()
+                for rec in records:
+                    snippet = (
+                        f"{rec.get('sched','?')} Schedule ({rec.get('stitle','')}), "
+                        f"Entry {rec.get('enum','?')}: {rec.get('etext','')}"
+                    )
+                    if snippet not in snippets:
+                        snippets.append(snippet)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("knowledge_graph | Neo4j unavailable: %s", exc)
+        return []
 
     logger.debug(
         "knowledge_graph | constitution query | hits=%d | query=%r", len(snippets), query
@@ -202,14 +207,18 @@ async def query_knowledge(query: str, thread_id: str, limit: int = 8) -> list[st
 async def get_related_entities(entity: str, depth: int = 1) -> list[str]:
     """Return entity names related to *entity* within *depth* hops."""
     driver = await get_kg_driver()
-    async with driver.session(database=_shared_database) as session:
-        result = await session.run(
-            f"""
-            MATCH (e:Entity {{name: $name}})-[:RELATED_TO*1..{depth}]-(r:Entity)
-            RETURN DISTINCT r.name AS name
-            LIMIT 20
-            """,
-            name=entity,
-        )
-        records = await result.data()
-    return [r["name"] for r in records if r.get("name")]
+    try:
+        async with driver.session(database=_shared_database) as session:
+            result = await session.run(
+                f"""
+                MATCH (e:Entity {{name: $name}})-[:RELATED_TO*1..{depth}]-(r:Entity)
+                RETURN DISTINCT r.name AS name
+                LIMIT 20
+                """,
+                name=entity,
+            )
+            records = await result.data()
+        return [r["name"] for r in records if r.get("name")]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("knowledge_graph | get_related_entities failed: %s", exc)
+        return []
