@@ -18,11 +18,13 @@ Usage
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import os
 import sys
 import threading
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from textwrap import dedent
 
@@ -147,13 +149,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     graph = context.bot_data["graph"]
     tid = _thread_id(update)
 
-    # Show a typing indicator while the LLM works.
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,  # type: ignore[union-attr]
-        action=ChatAction.TYPING,
-    )
-
     logger.info("bot | query=%r thread_id=%s", query[:80], tid)
+
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(
+        _keep_typing(context.bot, update.effective_chat.id, stop_typing)  # type: ignore[union-attr]
+    )
 
     try:
         initial_state = LoomState(
@@ -171,6 +172,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.HTML,
         )
         return
+    finally:
+        stop_typing.set()
+        typing_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await typing_task
 
     if final_state.response is None:
         await update.message.reply_text("🤔 No response was generated.")  # type: ignore[union-attr]
@@ -196,6 +202,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     body = html.escape(resp.answer) + footer
     for chunk in _split_message(body):
         await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)  # type: ignore[union-attr]
+
+
+async def _keep_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
+    """Re-send typing action every 4 s until stop is set (Telegram expires it after ~5 s)."""
+    while not stop.is_set():
+        with suppress(Exception):
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await asyncio.sleep(4)
 
 
 def _confidence_bar(score: float) -> str:
