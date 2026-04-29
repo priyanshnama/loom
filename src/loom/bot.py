@@ -251,16 +251,16 @@ def _start_health_server() -> None:
 
 
 def main() -> None:
-    if not settings.telegram_token:
-        print(
-            "Error: TELEGRAM_BOT_TOKEN is not set in .env",
-            file=sys.stderr,
-        )
+    token = settings.active_telegram_token
+    if not token:
+        env_var = "TELEGRAM_BOT_TOKEN" if settings.loom_env == "production" else "TELEGRAM_BOT_TOKEN_LOCAL"
+        print(f"Error: {env_var} is not set in .env (LOOM_ENV={settings.loom_env})", file=sys.stderr)
         sys.exit(1)
 
+    logger.info("bot | env=%s", settings.loom_env)
     app = (
         Application.builder()
-        .token(settings.telegram_token)
+        .token(token)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()

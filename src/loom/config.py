@@ -33,8 +33,21 @@ class Settings(BaseSettings):
     loom_confidence_threshold: float = Field(0.75, alias="LOOM_CONFIDENCE_THRESHOLD")
     loom_max_iterations: int = Field(3, alias="LOOM_MAX_ITERATIONS")
 
-    # Telegram bot
+    # Environment selector — drives which Telegram token is active.
+    # "local" (default) → TELEGRAM_BOT_TOKEN_LOCAL
+    # "production"       → TELEGRAM_BOT_TOKEN
+    loom_env: str = Field("local", alias="LOOM_ENV")
+
+    # Telegram bot — two separate bots so local testing never touches prod.
     telegram_token: str | None = Field(None, alias="TELEGRAM_BOT_TOKEN")
+    telegram_token_local: str | None = Field(None, alias="TELEGRAM_BOT_TOKEN_LOCAL")
+
+    @property
+    def active_telegram_token(self) -> str | None:
+        """Return the token for the active environment."""
+        if self.loom_env == "production":
+            return self.telegram_token
+        return self.telegram_token_local or self.telegram_token
 
     # Logging
     log_level: str = Field("INFO", alias="LOG_LEVEL")

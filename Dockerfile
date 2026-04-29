@@ -22,6 +22,7 @@ COPY .env .env
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
+ENV LOOM_ENV=production
 
 # Cloud Run injects PORT; default to 8080 for local runs.
 EXPOSE 8080
