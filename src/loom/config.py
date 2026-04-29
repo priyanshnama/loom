@@ -49,6 +49,9 @@ class Settings(BaseSettings):
             return self.telegram_token
         return self.telegram_token_local or self.telegram_token
 
+    # Zomato MCP — set ZOMATO_MCP_ENABLED=true to activate
+    zomato_mcp_enabled: bool = Field(False, alias="ZOMATO_MCP_ENABLED")
+
     # Logging
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 

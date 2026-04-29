@@ -25,6 +25,7 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic_ai import Agent
+from pydantic_ai.mcp import MCPServerStdio
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
 from loom.config import settings
@@ -60,10 +61,16 @@ def _get_researcher() -> Agent[LoomDeps, str]:
     if _researcher is None:
         from loom.tools import RESEARCHER_TOOLS  # noqa: PLC0415
 
+        mcp_servers = (
+            [MCPServerStdio("npx", args=["-y", "mcp-remote", "https://mcp-server.zomato.com/mcp"])]
+            if settings.zomato_mcp_enabled
+            else []
+        )
         _researcher = Agent(
             settings.loom_model,
             system_prompt=_RESEARCHER_SYSTEM_PROMPT,
             tools=RESEARCHER_TOOLS,
+            mcp_servers=mcp_servers,
         )
     return _researcher
 
@@ -191,7 +198,9 @@ async def researcher_node(state: LoomState) -> dict:
     prompt = f"Research the following query using your tools.\n\nQuery: {state.query}"
 
     logger.info("researcher_node | query=%r", state.query[:80])
-    result = await _get_researcher().run(prompt, deps=deps)
+    researcher = _get_researcher()
+    async with researcher.run_mcp_servers():
+        result = await researcher.run(prompt, deps=deps)
 
     extra_messages, new_tool_outputs, detected_error, error_delta = _collect_tool_results(
         result, iteration=0

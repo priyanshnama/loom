@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "langgraph>=0.2.55",
     "langchain-core>=0.3.0",
-    "pydantic-ai[anthropic]>=1.0",
+    "pydantic-ai[anthropic,mcp]>=1.0",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "anthropic>=0.40.0",
