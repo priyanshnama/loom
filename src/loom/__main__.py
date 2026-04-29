@@ -222,7 +222,7 @@ async def _approve_and_resume(graph, checkpointer, config, raw, thread_id):
         await graph.aupdate_state(
             config,
             {"messages": [HumanMessage(content=f"[Operator feedback] {feedback}")]},
-            as_node="agent",
+            as_node="synthesizer",
         )
         # Re-invoke from the updated state; this resumes before respond_node
         # again if the new answer meets the confidence threshold.

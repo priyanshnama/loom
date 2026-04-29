@@ -54,3 +54,7 @@ class LoomState(BaseModel):
     # Cleared at the start of each agent_node run; re-set if errors occur.
     last_tool_error: str | None = None
 
+    # Raw research notes produced by researcher_node for this turn.
+    # Read by synthesizer_node to produce the final answer.
+    research_notes: str = ""
+
