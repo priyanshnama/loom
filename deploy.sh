@@ -34,9 +34,8 @@ IMAGE="asia-south1-docker.pkg.dev/gen-lang-client-0546866199/loom/bot:latest"
 REGION="asia-south1"
 SERVICE="loom-bot"
 
-echo "→ Building and pushing Docker image..."
-docker build -t "$IMAGE" .
-docker push "$IMAGE"
+echo "→ Building and pushing Docker image (linux/amd64 for Cloud Run)..."
+docker buildx build --platform linux/amd64 --push -t "$IMAGE" .
 
 echo "→ Deploying $SERVICE to Cloud Run ($REGION)..."
 gcloud run deploy "$SERVICE" \
