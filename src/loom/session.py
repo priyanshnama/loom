@@ -3,7 +3,7 @@
 Provides ``reset_thread`` which deletes all LangGraph checkpoints stored for a
 given ``thread_id``, effectively clearing the conversation history.
 
-Supports memory, SQLite, and Neo4j backends.
+Supports memory and SQLite backends.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ async def reset_thread(checkpointer: BaseCheckpointSaver, thread_id: str) -> Non
         logger.info("session | reset thread_id=%s (memory)", thread_id)
         return
 
-    # SQLite
     try:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: PLC0415
 
@@ -36,20 +35,7 @@ async def reset_thread(checkpointer: BaseCheckpointSaver, thread_id: str) -> Non
     except ImportError:
         pass
 
-    # Neo4j
-    from loom.persistence import Neo4jCheckpointer  # noqa: PLC0415
-
-    if isinstance(checkpointer, Neo4jCheckpointer):
-        await _reset_neo4j(checkpointer, thread_id)
-        logger.info("session | reset thread_id=%s (neo4j)", thread_id)
-        return
-
     raise NotImplementedError(f"reset_thread not supported for {type(checkpointer).__name__}")
-
-
-# ---------------------------------------------------------------------------
-# Backend-specific implementations
-# ---------------------------------------------------------------------------
 
 
 def _reset_memory(checkpointer: MemorySaver, thread_id: str) -> None:
@@ -67,18 +53,3 @@ async def _reset_sqlite(checkpointer: object, thread_id: str) -> None:
     for table in _SQLITE_TABLES:
         await conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))  # noqa: S608
     await conn.commit()
-
-
-async def _reset_neo4j(checkpointer: object, thread_id: str) -> None:
-    from loom.persistence import Neo4jCheckpointer  # noqa: PLC0415
-
-    cp: Neo4jCheckpointer = checkpointer  # type: ignore[assignment]
-    async with cp._driver.session(database=cp._db) as session:
-        await session.run(
-            """
-            MATCH (c:Checkpoint {thread_id: $tid})
-            OPTIONAL MATCH (c)-[:HAS_WRITE]->(w:CheckpointWrite)
-            DETACH DELETE c, w
-            """,
-            tid=thread_id,
-        )

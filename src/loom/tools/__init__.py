@@ -9,9 +9,5 @@ Adding a new tool
 
 from __future__ import annotations
 
-from loom.tools.constitution import query_constitution
-
 # Ordered list of all tools the pydantic-ai agent may call.
-TOOLS: list = [
-    query_constitution,
-]
+TOOLS: list = []

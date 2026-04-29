@@ -163,24 +163,6 @@ async def agent_node(state: LoomState) -> dict:
     - ``error_count``: incremented if a new tool error was detected.
     """
     # ------------------------------------------------------------------
-    # Fetch knowledge-graph context for this query (best-effort).
-    # ------------------------------------------------------------------
-    kg_snippets: list[str] = []
-    if state.query:
-        try:
-            from loom.knowledge_graph import query_knowledge  # noqa: PLC0415
-
-            # Infer thread_id from the last HumanMessage id or fall back to "default".
-            thread_id = "default"
-            for m in reversed(state.messages):
-                if isinstance(m, HumanMessage) and m.id:
-                    thread_id = m.id.split(":")[0]
-                    break
-            kg_snippets = await query_knowledge(state.query, thread_id=thread_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("agent_node | kg query failed: %s", exc)
-
-    # ------------------------------------------------------------------
     # Build prompt
     # ------------------------------------------------------------------
     prompt_parts: list[str] = []
@@ -206,12 +188,6 @@ async def agent_node(state: LoomState) -> dict:
             role = "User" if isinstance(msg, HumanMessage) else "Assistant"
             history_lines.append(f"{role}: {msg.content}")
         prompt_parts.append("Conversation so far:\n" + "\n".join(history_lines))
-
-    if kg_snippets:
-        prompt_parts.append(
-            "Relevant knowledge from prior searches:\n"
-            + "\n".join(f"  - {s}" for s in kg_snippets)
-        )
 
     if state.tool_outputs:
         lines = []
@@ -295,7 +271,6 @@ async def agent_node(state: LoomState) -> dict:
         "internal_monologue": response.reasoning,
         "last_tool_error": detected_error,   # None clears it for next turn
         "error_count": new_error_count,
-        "kg_context": kg_snippets,
     }
 
 

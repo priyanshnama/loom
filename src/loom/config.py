@@ -21,20 +21,13 @@ class Settings(BaseSettings):
     # System prompt — loaded from prompts/system.md by default; override via env var.
     loom_system_prompt: str = Field(default=_DEFAULT_SYSTEM_PROMPT, alias="LOOM_SYSTEM_PROMPT")
 
-    # Persistence backend: "memory" | "sqlite" | "neo4j"
+    # Persistence backend: "memory" | "sqlite"
     # memory  — in-process only; lost when the process exits (default, no setup needed)
     # sqlite  — file-backed SQLite; persists across CLI invocations, no server required
-    # neo4j   — production-grade; requires a running Neo4j instance
     loom_persistence: str = Field("memory", alias="LOOM_PERSISTENCE")
 
     # SQLite persistence
     sqlite_path: str = Field("./loom_checkpoints.db", alias="SQLITE_PATH")
-
-    # Neo4j persistence + knowledge graph (used when LOOM_PERSISTENCE=neo4j, and always for KG)
-    neo4j_uri: str = Field("bolt://localhost:7687", alias="NEO4J_URI")
-    neo4j_username: str = Field("neo4j", alias="NEO4J_USERNAME")
-    neo4j_password: str = Field("", alias="NEO4J_PASSWORD")
-    neo4j_database: str = Field("neo4j", alias="NEO4J_DATABASE")
 
     # Agent tuning
     loom_confidence_threshold: float = Field(0.75, alias="LOOM_CONFIDENCE_THRESHOLD")

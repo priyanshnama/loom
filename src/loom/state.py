@@ -54,6 +54,3 @@ class LoomState(BaseModel):
     # Cleared at the start of each agent_node run; re-set if errors occur.
     last_tool_error: str | None = None
 
-    # Snippets retrieved from the Neo4j knowledge graph for this turn.
-    # Injected by agent_node before building the prompt.
-    kg_context: list[str] = Field(default_factory=list)
