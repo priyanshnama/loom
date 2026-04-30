@@ -47,3 +47,5 @@ htmlcov/
 .vscode/
 *.swp
 *.swo
+
+.compound-engineering/
