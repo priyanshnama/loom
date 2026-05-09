@@ -258,6 +258,19 @@ async def synthesizer_node(state: LoomState) -> dict:
         )
         prompt_parts.append(f"Conversation so far:\n{history}")
 
+    if state.tool_outputs:
+        summary_lines = [
+            f"- {name}: called {len(outputs)} time(s)"
+            for name, outputs in state.tool_outputs.items()
+        ]
+        prompt_parts.append(
+            "Tools used by the research agent:\n" + "\n".join(summary_lines)
+        )
+    else:
+        prompt_parts.append(
+            "Tools used by the research agent: none (the researcher answered from prior knowledge)."
+        )
+
     if state.research_notes:
         prompt_parts.append(f"Research findings:\n{state.research_notes}")
 

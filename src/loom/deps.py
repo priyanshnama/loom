@@ -13,7 +13,11 @@ def get_http_client() -> httpx.AsyncClient:
     """Return a process-wide shared async HTTP client (created on first call)."""
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
+        _client = httpx.AsyncClient(
+            timeout=15.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Loom/1.0 (https://github.com/priyanshnama/loom; contact: priyanshnama@gmail.com)"},
+        )
     return _client
 
 
